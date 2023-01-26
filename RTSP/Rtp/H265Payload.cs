@@ -1,6 +1,7 @@
 ﻿using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using Rtsp.Onvif;
+using Rtsp.Utils;
 using System;
 using System.Buffers;
 using System.Buffers.Binary;
@@ -25,10 +26,9 @@ namespace Rtsp.Rtp
 
         private readonly bool hasDonl;
 
-        private readonly List<ReadOnlyMemory<byte>> nals = [];
-        private readonly List<IMemoryOwner<byte>> owners = [];
+        private PooledSequence? nalsBuffer;
         // used to concatenate fragmented NALs where NALs are split over RTP packets
-        private readonly MemoryStream fragmentedNal = new();
+        private readonly PooledBufferWriter fragmentedNal;
         private readonly MemoryPool<byte> _memoryPool;
 
         private DateTime _timestamp;
@@ -40,6 +40,7 @@ namespace Rtsp.Rtp
 
             _logger = logger as ILogger ?? NullLogger.Instance;
             _memoryPool = memoryPool ?? MemoryPool<byte>.Shared;
+            fragmentedNal = new(memoryPool);
         }
 
         /// <summary>
@@ -117,13 +118,13 @@ namespace Rtsp.Rtp
                 // Initiise the fragmented_nal byte array
 
                 // Empty the stream
-                fragmentedNal.SetLength(0);
+                fragmentedNal.Clear();
 
                 // Reconstrut the NAL header from the rtp_payload_header, replacing the Type with FU Type
                 int nal_header = payloadHeader & 0x81FF; // strip out existing 'type'
                 nal_header |= fu_header_type << 9;
-                fragmentedNal.WriteByte((byte)(nal_header >> 8 & 0xFF));
-                fragmentedNal.WriteByte((byte)(nal_header >> 0 & 0xFF));
+                fragmentedNal.Write((byte)(nal_header >> 8 & 0xFF));
+                fragmentedNal.Write((byte)(nal_header >> 0 & 0xFF));
             }
 
             // Part of Fragment
@@ -145,7 +146,7 @@ namespace Rtsp.Rtp
                 // Add the NAL to the array of NAL units
                 var length = (int)fragmentedNal.Length;
                 var nalSpan = PrepareNewNal(length);
-                fragmentedNal.GetBuffer().AsSpan()[..length].CopyTo(nalSpan);
+                fragmentedNal.CopyTo(nalSpan);
             }
         }
 
@@ -182,10 +183,8 @@ namespace Rtsp.Rtp
 
         private Span<byte> PrepareNewNal(int sizeWitoutHeader)
         {
-            var owner = _memoryPool.Rent(sizeWitoutHeader + 4);
-            owners.Add(owner);
-            var memory = owner.Memory[..(sizeWitoutHeader + 4)];
-            nals.Add(memory);
+            nalsBuffer = new(_memoryPool);
+            var memory = nalsBuffer.GetMemory(sizeWitoutHeader + 4);
             // Add the NAL start code 00 00 00 01
             memory.Span[0] = 0;
             memory.Span[1] = 0;
@@ -211,13 +210,12 @@ namespace Rtsp.Rtp
 
             // End Marker is set return the list of NALs
             // clone list of nalUnits and owners
-            var result = new RawMediaFrame([.. nals], [.. owners])
+            var result = new RawMediaFrame(nalsBuffer?.GetReadOnlySequence() ?? ReadOnlySequence<byte>.Empty, nalsBuffer)
             {
                 RtpTimestamp = packet.Timestamp,
                 ClockTimestamp = _timestamp,
             };
-            nals.Clear();
-            owners.Clear();
+            nalsBuffer = null;
             return result;
         }
     }

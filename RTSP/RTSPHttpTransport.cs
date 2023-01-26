@@ -1,4 +1,5 @@
 ﻿using Rtsp.Messages;
+using Rtsp.Utils;
 using System;
 using System.Buffers;
 using System.Buffers.Text;
@@ -24,12 +25,15 @@ namespace Rtsp
             private readonly string _sessionCookie = Guid.NewGuid().ToString("N")[..10];
             private readonly RtspHttpTransport _parent;
             private TcpClient? _outClient;
-            private readonly MemoryStream _sendBuffer = new();
+            private readonly PooledBufferWriter _sendBuffer;
+            private readonly MemoryPool<byte> _memoryPool;
 
-            public HttpTransportStream(RtspHttpTransport parent)
+            public HttpTransportStream(RtspHttpTransport parent, MemoryPool<byte>? memoryPool = null)
             {
                 _inStream = parent._dataClient!.GetStream();
                 _parent = parent;
+                _memoryPool = memoryPool ?? MemoryPool<byte>.Shared;
+                _sendBuffer = new(_memoryPool);
             }
 
             internal bool Open()
@@ -92,13 +96,11 @@ namespace Rtsp
             public override void Flush()
             {
                 var commandLength = (int)_sendBuffer.Length;
-                var basse64Buffer = ArrayPool<byte>.Shared.Rent(Base64.GetMaxEncodedToUtf8Length(commandLength));
+                using var basse64Buffer = _memoryPool.Rent(Base64.GetMaxEncodedToUtf8Length(commandLength));
 
-                _sendBuffer.Position = 0;
-                var read = _sendBuffer.Read(basse64Buffer, 0, commandLength);
-                Debug.Assert(read == commandLength);
-                Base64.EncodeToUtf8InPlace(basse64Buffer, commandLength, out int byteWritten);
-                var base64CommandBytes = basse64Buffer.AsSpan(0, byteWritten);
+                _sendBuffer.CopyTo(basse64Buffer.Memory.Span);
+                Base64.EncodeToUtf8InPlace(basse64Buffer.Memory.Span, commandLength, out int byteWritten);
+                var base64CommandBytes = basse64Buffer.Memory.Span.Slice(0, byteWritten);
 
 
                 if (_outClient?.Connected != true)
@@ -114,14 +116,13 @@ namespace Rtsp
                 }
 
                 _outClient.GetStream().Write(base64CommandBytes);
-                ArrayPool<byte>.Shared.Return(basse64Buffer);
 
-                _sendBuffer.SetLength(0);
+                _sendBuffer.Clear();
             }
 
             public override int Read(byte[] buffer, int offset, int count) => _inStream.Read(buffer, offset, count);
 
-            public override void Write(byte[] buffer, int offset, int count) => _sendBuffer.Write(buffer, offset, count);
+            public override void Write(byte[] buffer, int offset, int count) => _sendBuffer.Write(buffer.AsSpan(offset, count));
 
 #if NETSTANDARD2_1_OR_GREATER || NET8_0_OR_GREATER
             // Remove a copy when possible

@@ -1,4 +1,5 @@
 ﻿using System;
+using System.Buffers;
 using System.Collections.Generic;
 using static System.Runtime.InteropServices.JavaScript.JSType;
 
@@ -47,6 +48,6 @@ namespace RtspClientExample
         public ulong RtpTimestamp { get; } = rtpTimeStamp;
         public DateTime ClockTimeStamp { get; } = clockTimeStamp;
         //public DateTime TimeStamp { get; } = timeStamp;
-        public List<ReadOnlyMemory<byte>> Data { get; } = data;
+        public ReadOnlySequence<byte> Data { get; }
     }
 }
